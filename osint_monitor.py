@@ -2,6 +2,7 @@ import os
 import json
 import requests
 import pandas as pd
+import io
 from datetime import datetime, timedelta, timezone
 from shapely.geometry import Point
 from sentinelhub import SHConfig, SentinelHubRequest, DataCollection, BBox, CRS, MimeType
@@ -23,17 +24,24 @@ def get_config():
     return config
 
 def load_state():
+    default_state = {"processed_fires": []}
     if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, 'r') as f:
-            return json.load(f)
-    return {"processed_fires": []}
+        try:
+            with open(STATE_FILE, 'r') as f:
+                state = json.load(f)
+                # Garante que a chave existe mesmo que o arquivo esteja {}
+                if not isinstance(state, dict) or "processed_fires" not in state:
+                    return default_state
+                return state
+        except Exception:
+            return default_state
+    return default_state
 
 def save_state(state):
     with open(STATE_FILE, 'w') as f:
         json.dump(state, f, indent=4)
 
 def is_industrial(lat, lon):
-    point = (lat, lon)
     for site in INDUSTRIAL_SITES:
         dist = ((lat - site['lat'])**2 + (lon - site['lon'])**2)**0.5 # Aproximação simples
         if dist < 0.02: # Aprox. 2km
@@ -42,13 +50,13 @@ def is_industrial(lat, lon):
 
 def fetch_firms_data():
     api_key = os.getenv('NASA_API_KEY')
-    # Bbox Ucrânia: 22, 44, 40, 52
+    # Bbox Ucrânia: USANDO FILTRO POR PAÍS (UKR)
     url = f"https://firms.modaps.eosdis.nasa.gov/api/country/csv/{api_key}/VIIRS_SNPP/UKR/1"
     response = requests.get(url)
     if response.status_code != 200:
         return []
     
-    df = pd.read_csv(requests.utils.io.StringIO(response.text))
+    df = pd.read_csv(io.StringIO(response.text))
     new_fires = []
     state = load_state()
 
@@ -65,43 +73,46 @@ def fetch_firms_data():
     return new_fires
 
 def get_satellite_image(lat, lon):
-    config = get_config()
-    # Criar uma BBox de 2km ao redor do ponto
-    offset = 0.01 
-    bbox = BBox(bbox=[lon-offset, lat-offset, lon+offset, lat+offset], crs=CRS.WGS84)
-    
-    evalscript = """
-    //VERSION=3
-    function setup() {
-      return {
-        input: ["B04", "B03", "B02"],
-        output: { bands: 3 }
-      };
-    }
-    function evaluatePixel(sample) {
-      return [2.5 * sample.B04, 2.5 * sample.B03, 2.5 * sample.B02];
-    }
-    """
+    try:
+        config = get_config()
+        # Criar uma BBox de 2km ao redor do ponto
+        offset = 0.01 
+        bbox = BBox(bbox=[lon-offset, lat-offset, lon+offset, lat+offset], crs=CRS.WGS84)
+        
+        evalscript = """
+        //VERSION=3
+        function setup() {
+          return {
+            input: ["B04", "B03", "B02"],
+            output: { bands: 3 }
+          };
+        }
+        function evaluatePixel(sample) {
+          return [2.5 * sample.B04, 2.5 * sample.B03, 2.5 * sample.B02];
+        }
+        """
 
-    request = SentinelHubRequest(
-        evalscript=evalscript,
-        input_data=[
-            SentinelHubRequest.input_data_obj(
-                data_collection=DataCollection.SENTINEL2_L2A,
-                time_interval=(datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d'),
-            )
-        ],
-        responses=[SentinelHubRequest.output_obj('default', MimeType.PNG)],
-        bbox=bbox,
-        size=(800, 800),
-        config=config
-    )
-    
-    response = request.get_data()
-    if response:
-        with open("fire_spot.png", "wb") as f:
-            f.write(response[0])
-        return "fire_spot.png"
+        request = SentinelHubRequest(
+            evalscript=evalscript,
+            input_data=[
+                SentinelHubRequest.input_data_obj(
+                    data_collection=DataCollection.SENTINEL2_L2A,
+                    time_interval=(datetime.now(timezone.utc) - timedelta(days=5)).strftime('%Y-%m-%d'),
+                )
+            ],
+            responses=[SentinelHubRequest.output_obj('default', MimeType.PNG)],
+            bbox=bbox,
+            size=(800, 800),
+            config=config
+        )
+        
+        response = request.get_data()
+        if response:
+            with open("fire_spot.png", "wb") as f:
+                f.write(response[0])
+            return "fire_spot.png"
+    except Exception as e:
+        print(f"Erro ao capturar imagem: {e}")
     return None
 
 def send_telegram(caption, image_path):
@@ -109,17 +120,21 @@ def send_telegram(caption, image_path):
     chat_id = os.getenv('TELEGRAM_CHAT_ID')
     url = f"https://api.telegram.org/bot{token}/sendPhoto"
     
-    with open(image_path, 'rb') as photo:
-        requests.post(url, data={'chat_id': chat_id, 'caption': caption, 'parse_mode': 'Markdown'}, files={'photo': photo})
+    try:
+        with open(image_path, 'rb') as photo:
+            requests.post(url, data={'chat_id': chat_id, 'caption': caption, 'parse_mode': 'Markdown'}, files={'photo': photo}, timeout=20)
+    except Exception as e:
+        print(f"Erro ao enviar Telegram: {e}")
 
 def main():
     fires = fetch_firms_data()
-    for fire in fires[:3]: # Processar apenas os 3 mais recentes para não travar
+    # Pega apenas os 3 primeiros novos focos para evitar atingir limites
+    for _, fire in pd.DataFrame(fires).head(3).iterrows():
         img = get_satellite_image(fire['latitude'], fire['longitude'])
         if img:
             caption = (
                 f"🔥 *STRIKE ALERT - UKRAINE*\n\n"
-                f"🎯 *Confidence:* {fire['confidence']}%\n"
+                f"🎯 *Confidence:* {fire['confidence']}\n"
                 f"🚀 *FRP:* {fire['frp']}\n"
                 f"📍 *Location:* `{fire['latitude']}, {fire['longitude']}`\n"
                 f"🕒 *Time:* {fire['acq_date']} {fire['acq_time']} UTC\n\n"
