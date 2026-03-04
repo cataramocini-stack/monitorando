@@ -17,14 +17,24 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+
+      - name: Restore state cache
+        uses: actions/cache@v4
+        with:
+          path: bot_state.json
+          key: bot-state-${{ github.run_id }}
+          restore-keys: |
+            bot-state-
 
       - name: Install dependencies
         run: |
-          pip install pandas requests sentinelhub
+          pip install -r requirements.txt
 
       - name: Ensure state file exists
         run: |
-          if [ ! -f bot_state.json ]; then echo '{"processed_fires": []}' > bot_state.json; fi
+          if [ ! -f bot_state.json ]; then echo '{"schema_version":1,"processed_fires":[]}' > bot_state.json; fi
 
       - name: Run Monitor
         env:
@@ -35,10 +45,29 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python osint_monitor.py
 
+      - name: Upload fire images
+        uses: actions/upload-artifact@v4
+        with:
+          name: fire-images
+          path: fire_images/*.png
+          if-no-files-found: ignore
+
+      - name: Upload state
+        uses: actions/upload-artifact@v4
+        with:
+          name: bot-state
+          path: bot_state.json
+          if-no-files-found: ignore
+
       - name: Commit and Push State
+        if: ${{ env.ALLOW_STATE_COMMIT == 'true' }}
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add bot_state.json
-          git commit -m "Update fire state [skip ci]" || exit 0
-          git push
+          if git status --porcelain bot_state.json | grep .; then
+            git add bot_state.json
+            git commit -m "Update fire state [skip ci]"
+            git push
+          else
+            echo "No state changes to commit"
+          fi
