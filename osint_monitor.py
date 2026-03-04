@@ -11,7 +11,7 @@ import pandas as pd
 from sentinelhub import SHConfig, SentinelHubRequest, DataCollection, BBox, CRS, MimeType
 from geopy.distance import geodesic
 
-# ----- CONFIGURAÇÃO -----
+# ----- CONFIGURAÇÃO ----- 
 INDUSTRIAL_SITES = [
     {"name": "Kremenchuk", "lat": 49.12, "lon": 33.48},
     {"name": "Zaporizhzhia", "lat": 47.51, "lon": 34.58},
@@ -167,13 +167,11 @@ def request_sentinel_image(lat, lon, data_collection):
     bbox = BBox(bbox=[lon - offset, lat - offset, lon + offset, lat + offset], crs=CRS.WGS84)
     request = SentinelHubRequest(
         evalscript=get_evalscript(),
-        input_data=[
-            SentinelHubRequest.input_data_obj(
-                data_collection=data_collection,
-                time_interval=(datetime.now(timezone.utc) - timedelta(days=3), datetime.now(timezone.utc)),
-                maxcc=CLOUD_THRESHOLD
-            )
-        ],
+        input_data=[SentinelHubRequest.input_data_obj(
+            data_collection=data_collection,
+            time_interval=(datetime.now(timezone.utc) - timedelta(days=3), datetime.now(timezone.utc)),
+            maxcc=CLOUD_THRESHOLD
+        )],
         responses=[SentinelHubRequest.output_obj("default", MimeType.PNG)],
         bbox=bbox,
         size=(800, 800),
@@ -187,15 +185,15 @@ def request_sentinel_image(lat, lon, data_collection):
 def get_satellite_image(fire):
     lat = float(fire["latitude"])
     lon = float(fire["longitude"])
-    os.makedirs(IMAGE_DIR, exist_ok=True)
+    timestamp_dir = datetime.now(timezone.utc).strftime("%Y%m%d")
+    image_dir = os.path.join(IMAGE_DIR, timestamp_dir)
+    os.makedirs(image_dir, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     filename = f"fire_{fire['fire_id']}_{timestamp}.png"
-    path = os.path.join(IMAGE_DIR, filename)
+    path = os.path.join(image_dir, filename)
+    
     try:
-        data = request_sentinel_image(lat, lon, DataCollection.SENTINEL2_L2A)
-        if not data:
-            logger.info("L2A image unavailable, falling back to L1C for %s", fire["fire_id"])
-            data = request_sentinel_image(lat, lon, DataCollection.SENTINEL2_L1C)
+        data = get_satellite_image_with_fallback(lat, lon)
         if not data:
             logger.error("Sentinel image unavailable for %s", fire["fire_id"])
             return None
@@ -206,6 +204,13 @@ def get_satellite_image(fire):
     except Exception as exc:
         logger.error("Sentinel image failed for %s: %s", fire["fire_id"], exc)
         return None
+
+def get_satellite_image_with_fallback(lat, lon):
+    image = request_sentinel_image(lat, lon, DataCollection.SENTINEL2_L2A)
+    if not image:
+        logger.info("Falling back to L1C image")
+        image = request_sentinel_image(lat, lon, DataCollection.SENTINEL2_L1C)
+    return image
 
 # ----- TELEGRAM -----
 def escape_markdown_v2(text):
