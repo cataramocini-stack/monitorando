@@ -1,12 +1,14 @@
 name: Ukraine Satellite OSINT
 on:
   schedule:
-    - cron: '0 */1 * * *' # Roda a cada 4 horas
-  workflow_dispatch:      # Permite rodar manualmente
+    - cron: '0 */1 * * *'
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # Permissão explícita para o bot commitar
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -17,7 +19,12 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install pandas requests sentinelhub
+
+      - name: Ensure state file exists
+        run: |
+          if [ ! -f bot_state.json ]; then echo '{"processed_fires": []}' > bot_state.json; fi
 
       - name: Run Monitor
         env:
@@ -28,10 +35,10 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python osint_monitor.py
 
-      - name: Commit State
+      - name: Commit and Push State
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add bot_state.json
-          git commit -m "Update fire state [skip ci]" || echo "No changes to commit"
+          git commit -m "Update fire state [skip ci]" || exit 0
           git push
