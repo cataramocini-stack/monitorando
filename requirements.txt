@@ -1,0 +1,5 @@
+requests
+sentinelhub
+shapely
+pandas
+python-dotenv
