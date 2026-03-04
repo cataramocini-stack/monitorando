@@ -11,6 +11,7 @@ import pandas as pd
 from sentinelhub import SHConfig, SentinelHubRequest, DataCollection, BBox, CRS, MimeType
 from geopy.distance import geodesic
 
+# ----- CONFIGURAÇÃO -----
 INDUSTRIAL_SITES = [
     {"name": "Kremenchuk", "lat": 49.12, "lon": 33.48},
     {"name": "Zaporizhzhia", "lat": 47.51, "lon": 34.58},
@@ -26,6 +27,7 @@ IMAGE_DIR = "fire_images"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
+# ----- FUNÇÕES DE CONFIGURAÇÃO -----
 def get_config():
     config = SHConfig()
     config.sh_client_id = os.getenv("CDSE_CLIENT_ID")
@@ -33,6 +35,7 @@ def get_config():
     config.sh_base_url = "https://sh.dataspace.copernicus.eu"
     return config
 
+# ----- ESTADO -----
 def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r") as f:
@@ -58,6 +61,7 @@ def save_state(state):
 def processed_ids(state):
     return {item["id"] for item in state.get("processed_fires", []) if "id" in item}
 
+# ----- REQUISIÇÕES -----
 def request_with_retries(url, attempts=3, timeout=30):
     for attempt in range(1, attempts + 1):
         try:
@@ -72,6 +76,7 @@ def request_with_retries(url, attempts=3, timeout=30):
             logger.error("FIRMS request error on attempt %s: %s", attempt, exc)
             time.sleep(backoff)
 
+# ----- UTILITÁRIOS -----
 def is_industrial(lat, lon):
     for site in INDUSTRIAL_SITES:
         distance_km = geodesic((lat, lon), (site["lat"], site["lon"])).km
@@ -83,21 +88,23 @@ def parse_fire_timestamp(acq_date, acq_time):
     if not acq_date:
         return datetime.now(timezone.utc)
     try:
-        acq_time = str(int(acq_time)).zfill(4) if acq_time == acq_time else "0000"
-        return datetime.strptime(f"{acq_date}{acq_time}", "%Y-%m-%d%H%M").replace(tzinfo=timezone.utc)
+        acq_time_str = str(int(acq_time)).zfill(4) if acq_time else "0000"
+        return datetime.strptime(f"{acq_date}{acq_time_str}", "%Y-%m-%d%H%M").replace(tzinfo=timezone.utc)
     except Exception:
         return datetime.now(timezone.utc)
 
 def build_fire_id(lat, lon, acq_date, acq_time):
-    time_part = str(int(acq_time)).zfill(4) if acq_time == acq_time else "0000"
+    time_part = str(int(acq_time)).zfill(4) if acq_time else "0000"
     date_part = acq_date if acq_date else "unknown"
     return f"{lat:.5f}_{lon:.5f}_{date_part}_{time_part}"
 
+# ----- FETCH DE DADOS FIRMS -----
 def fetch_firms_data(state):
     api_key = os.getenv("NASA_API_KEY")
     if not api_key:
         logger.error("NASA_API_KEY not configured")
         return []
+
     url = f"https://firms.modaps.eosdis.nasa.gov/api/country/csv/{api_key}/VIIRS_SNPP/UKR/1"
     logger.info("Starting FIRMS check")
     try:
@@ -106,18 +113,19 @@ def fetch_firms_data(state):
     except Exception as exc:
         logger.error("FIRMS fetch failed: %s", exc)
         return []
+
     if df.empty:
         logger.info("No FIRMS data returned")
         return []
+
     df = df.sort_values(by="frp", ascending=False)
     seen_ids = processed_ids(state)
     new_fires = []
+
     for _, row in df.iterrows():
         lat = float(row["latitude"])
         lon = float(row["longitude"])
-        if row["frp"] < MIN_FRP:
-            continue
-        if is_industrial(lat, lon):
+        if row["frp"] < MIN_FRP or is_industrial(lat, lon):
             continue
         fire_id = build_fire_id(lat, lon, row.get("acq_date"), row.get("acq_time"))
         if fire_id in seen_ids:
@@ -126,9 +134,11 @@ def fetch_firms_data(state):
         fire["fire_id"] = fire_id
         fire["fire_timestamp"] = parse_fire_timestamp(row.get("acq_date"), row.get("acq_time")).isoformat()
         new_fires.append(fire)
+
     logger.info("FIRMS fetched: %s new fires", len(new_fires))
     return new_fires
 
+# ----- SENTINEL HUB -----
 def get_evalscript():
     return """
 //VERSION=3
@@ -179,7 +189,7 @@ def get_satellite_image(fire):
     lon = float(fire["longitude"])
     os.makedirs(IMAGE_DIR, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    filename = f"fire_{timestamp}_{lat:.4f}_{lon:.4f}.png"
+    filename = f"fire_{fire['fire_id']}_{timestamp}.png"
     path = os.path.join(IMAGE_DIR, filename)
     try:
         data = request_sentinel_image(lat, lon, DataCollection.SENTINEL2_L2A)
@@ -197,6 +207,7 @@ def get_satellite_image(fire):
         logger.error("Sentinel image failed for %s: %s", fire["fire_id"], exc)
         return None
 
+# ----- TELEGRAM -----
 def escape_markdown_v2(text):
     return re.sub(r"([_*\[\]()~`>#+\-=|{}.!])", r"\\\1", str(text))
 
@@ -241,6 +252,7 @@ def send_telegram(caption, image_path):
         logger.error("Telegram send failed: %s", exc)
         return False
 
+# ----- PROCESSAMENTO -----
 def build_state_entry(fire):
     return {
         "id": fire["fire_id"],
@@ -260,32 +272,39 @@ def process_fire(fire):
         return build_state_entry(fire)
     return None
 
+# ----- MAIN -----
 def main():
-    state = load_state()
-    fires = fetch_firms_data(state)
-    if not fires:
-        logger.info("No new fires to process")
-        return
-    fires_to_process = fires[:MAX_ALERTS]
-    processed_entries = []
-    if len(fires_to_process) > 1:
-        with ThreadPoolExecutor(max_workers=min(4, len(fires_to_process))) as executor:
-            futures = [executor.submit(process_fire, fire) for fire in fires_to_process]
-            for future in as_completed(futures):
-                entry = future.result()
-                if entry:
-                    processed_entries.append(entry)
-    else:
-        entry = process_fire(fires_to_process[0])
-        if entry:
-            processed_entries.append(entry)
-    if processed_entries:
-        state["processed_fires"].extend(processed_entries)
-        state["processed_fires"] = state["processed_fires"][-MAX_RECORDS:]
-        save_state(state)
-        logger.info("State updated with %s new entries", len(processed_entries))
-    else:
-        logger.info("No new entries saved")
+    try:
+        state = load_state()
+        fires = fetch_firms_data(state)
+        if not fires:
+            logger.info("No new fires to process")
+            return
+
+        fires_to_process = fires[:MAX_ALERTS]
+        processed_entries = []
+
+        if len(fires_to_process) > 1:
+            with ThreadPoolExecutor(max_workers=min(4, len(fires_to_process))) as executor:
+                futures = [executor.submit(process_fire, fire) for fire in fires_to_process]
+                for future in as_completed(futures):
+                    entry = future.result()
+                    if entry:
+                        processed_entries.append(entry)
+        else:
+            entry = process_fire(fires_to_process[0])
+            if entry:
+                processed_entries.append(entry)
+
+        if processed_entries:
+            state["processed_fires"].extend(processed_entries)
+            state["processed_fires"] = state["processed_fires"][-MAX_RECORDS:]
+            save_state(state)
+            logger.info("State updated with %s new entries", len(processed_entries))
+        else:
+            logger.info("No new entries saved")
+    except Exception as exc:
+        logger.exception("Unhandled error in main: %s", exc)
 
 if __name__ == "__main__":
     main()
