@@ -1,14 +1,18 @@
 name: Ukraine Satellite OSINT
+
 on:
   schedule:
-    - cron: '0 */1 * * *'
+    - cron: '0 */1 * * *'  # Executa a cada hora
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Permissão explícita para o bot commitar
+      contents: write  # Necessário para commit do estado
+    env:
+      ALLOW_STATE_COMMIT: true  # Habilita commit automático do estado
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -24,7 +28,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: bot_state.json
-          key: bot-state-${{ github.run_id }}
+          key: bot-state-${{ runner.os }}-${{ hashFiles('bot_state.json') }}
           restore-keys: |
             bot-state-
 
@@ -34,7 +38,9 @@ jobs:
 
       - name: Ensure state file exists
         run: |
-          if [ ! -f bot_state.json ]; then echo '{"schema_version":1,"processed_fires":[]}' > bot_state.json; fi
+          if [ ! -f bot_state.json ]; then
+            echo '{"schema_version":1,"processed_fires":[]}' > bot_state.json
+          fi
 
       - name: Run Monitor
         env:
@@ -60,14 +66,15 @@ jobs:
           if-no-files-found: ignore
 
       - name: Commit and Push State
-        if: ${{ env.ALLOW_STATE_COMMIT == 'true' }}
+        if: env.ALLOW_STATE_COMMIT == 'true'
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
+          git fetch origin main
+          git checkout main
           if git status --porcelain bot_state.json | grep .; then
             git add bot_state.json
             git commit -m "Update fire state [skip ci]"
             git push
           else
             echo "No state changes to commit"
-          fi
