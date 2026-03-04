@@ -17,7 +17,7 @@ INDUSTRIAL_SITES = [
     {"name": "Zaporizhzhia", "lat": 47.51, "lon": 34.58},
     {"name": "Odessa Port", "lat": 46.50, "lon": 30.73}
 ]
-MIN_FRP = 35.0
+MIN_FRP = 35.0  # Potência mínima do fogo
 STATE_FILE = "bot_state.json"
 MAX_RECORDS = 300
 MAX_ALERTS = 2
@@ -27,7 +27,7 @@ IMAGE_DIR = "fire_images"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-# ----- FUNÇÕES DE CONFIGURAÇÃO -----
+# ----- FUNÇÕES DE CONFIGURAÇÃO ----- 
 def get_config():
     config = SHConfig()
     config.sh_client_id = os.getenv("CDSE_CLIENT_ID")
@@ -35,7 +35,7 @@ def get_config():
     config.sh_base_url = "https://sh.dataspace.copernicus.eu"
     return config
 
-# ----- ESTADO -----
+# ----- ESTADO ----- 
 def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r") as f:
@@ -61,7 +61,7 @@ def save_state(state):
 def processed_ids(state):
     return {item["id"] for item in state.get("processed_fires", []) if "id" in item}
 
-# ----- REQUISIÇÕES -----
+# ----- REQUISIÇÕES ----- 
 def request_with_retries(url, attempts=3, timeout=30):
     for attempt in range(1, attempts + 1):
         try:
@@ -76,7 +76,7 @@ def request_with_retries(url, attempts=3, timeout=30):
             logger.error("FIRMS request error on attempt %s: %s", attempt, exc)
             time.sleep(backoff)
 
-# ----- UTILITÁRIOS -----
+# ----- UTILITÁRIOS ----- 
 def is_industrial(lat, lon):
     for site in INDUSTRIAL_SITES:
         distance_km = geodesic((lat, lon), (site["lat"], site["lon"])).km
@@ -98,7 +98,7 @@ def build_fire_id(lat, lon, acq_date, acq_time):
     date_part = acq_date if acq_date else "unknown"
     return f"{lat:.5f}_{lon:.5f}_{date_part}_{time_part}"
 
-# ----- FETCH DE DADOS FIRMS -----
+# ----- FETCH DE DADOS FIRMS ----- 
 def fetch_firms_data(state):
     api_key = os.getenv("NASA_API_KEY")
     if not api_key:
@@ -206,9 +206,10 @@ def get_satellite_image(fire):
         return None
 
 def get_satellite_image_with_fallback(lat, lon):
+    # Tenta obter imagem do Sentinel-1 para impacto pós-incêndio
     image = request_sentinel_image(lat, lon, DataCollection.SENTINEL1)
     if not image:
-        logger.info("Sentinel-1 image unavailable for %s", (lat, lon))
+        logger.info(f"Imagem do Sentinel-1 indisponível para as coordenadas ({lat}, {lon})")
     return image
 
 # ----- TELEGRAM ----- 
@@ -256,7 +257,11 @@ def send_telegram(caption, image_path):
         logger.error("Telegram send failed: %s", exc)
         return False
 
-# ----- PROCESSAMENTO -----
+# ----- PROCESSAMENTO ----- 
+def is_fire_confirmed(fire):
+    # Verifica se o incêndio é confirmado pela potência do fogo (FRP)
+    return fire.get("frp", 0) >= MIN_FRP
+
 def build_state_entry(fire):
     return {
         "id": fire["fire_id"],
@@ -268,15 +273,22 @@ def build_state_entry(fire):
     }
 
 def process_fire(fire):
+    # Verifica se o incêndio foi confirmado
+    if not is_fire_confirmed(fire):
+        logger.info(f"Incêndio descartado (potência de fogo abaixo do limite): {fire['fire_id']}")
+        return None
+    
+    # Captura a imagem com o Sentinel-1
     image_path = get_satellite_image(fire)
     if not image_path:
         return None
+
     caption = build_caption(fire)
     if send_telegram(caption, image_path):
         return build_state_entry(fire)
     return None
 
-# ----- MAIN -----
+# ----- MAIN ----- 
 def main():
     try:
         state = load_state()
