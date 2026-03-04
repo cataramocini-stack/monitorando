@@ -138,7 +138,7 @@ def fetch_firms_data(state):
     logger.info("FIRMS fetched: %s new fires", len(new_fires))
     return new_fires
 
-# ----- SENTINEL HUB -----
+# ----- SENTINEL HUB ----- 
 def get_evalscript():
     return """
 //VERSION=3
@@ -206,13 +206,12 @@ def get_satellite_image(fire):
         return None
 
 def get_satellite_image_with_fallback(lat, lon):
-    image = request_sentinel_image(lat, lon, DataCollection.SENTINEL2_L2A)
+    image = request_sentinel_image(lat, lon, DataCollection.SENTINEL1)
     if not image:
-        logger.info("Falling back to L1C image")
-        image = request_sentinel_image(lat, lon, DataCollection.SENTINEL2_L1C)
+        logger.info("Sentinel-1 image unavailable for %s", (lat, lon))
     return image
 
-# ----- TELEGRAM -----
+# ----- TELEGRAM ----- 
 def escape_markdown_v2(text):
     return re.sub(r"([_*\[\]()~`>#+\-=|{}.!])", r"\\\1", str(text))
 
