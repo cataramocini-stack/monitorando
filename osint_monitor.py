@@ -4,16 +4,15 @@ import requests
 import pandas as pd
 import io
 from datetime import datetime, timedelta, timezone
-from shapely.geometry import Point
 from sentinelhub import SHConfig, SentinelHubRequest, DataCollection, BBox, CRS, MimeType
 
-# Configurações de Filtro
+# --- CONFIGURAÇÕES ---
 INDUSTRIAL_SITES = [
     {"name": "Kremenchuk", "lat": 49.12, "lon": 33.48},
     {"name": "Zaporizhzhia", "lat": 47.51, "lon": 34.58},
     {"name": "Odessa Port", "lat": 46.50, "lon": 30.73}
 ]
-MIN_FRP = 30.0
+MIN_FRP = 30.0  # Filtro de potência do fogo
 STATE_FILE = "bot_state.json"
 
 def get_config():
@@ -29,53 +28,75 @@ def load_state():
         try:
             with open(STATE_FILE, 'r') as f:
                 state = json.load(f)
-                # Garante que a chave existe mesmo que o arquivo esteja {}
                 if not isinstance(state, dict) or "processed_fires" not in state:
                     return default_state
                 return state
-        except Exception:
+        except Exception as e:
+            print(f"⚠️ Erro ao ler estado: {e}")
             return default_state
     return default_state
 
 def save_state(state):
-    with open(STATE_FILE, 'w') as f:
-        json.dump(state, f, indent=4)
+    try:
+        with open(STATE_FILE, 'w') as f:
+            json.dump(state, f, indent=4)
+        print("💾 Estado salvo com sucesso.")
+    except Exception as e:
+        print(f"❌ Erro ao salvar estado: {e}")
 
 def is_industrial(lat, lon):
     for site in INDUSTRIAL_SITES:
-        dist = ((lat - site['lat'])**2 + (lon - site['lon'])**2)**0.5 # Aproximação simples
-        if dist < 0.02: # Aprox. 2km
+        dist = ((lat - site['lat'])**2 + (lon - site['lon'])**2)**0.5
+        if dist < 0.02: # Aproximadamente 2km
             return True
     return False
 
 def fetch_firms_data():
+    print("🛰️ Conectando à API NASA FIRMS...")
     api_key = os.getenv('NASA_API_KEY')
-    # Bbox Ucrânia: USANDO FILTRO POR PAÍS (UKR)
     url = f"https://firms.modaps.eosdis.nasa.gov/api/country/csv/{api_key}/VIIRS_SNPP/UKR/1"
-    response = requests.get(url)
-    if response.status_code != 200:
-        return []
     
-    df = pd.read_csv(io.StringIO(response.text))
-    new_fires = []
-    state = load_state()
-
-    for _, row in df.iterrows():
-        f_id = f"{row['latitude']}_{row['longitude']}_{row['acq_date']}"
-        if row['frp'] > MIN_FRP and not is_industrial(row['latitude'], row['longitude']):
+    try:
+        response = requests.get(url, timeout=30)
+        if response.status_code != 200:
+            print(f"❌ Erro NASA: {response.status_code}")
+            return []
+        
+        df = pd.read_csv(io.StringIO(response.text))
+        print(f"📊 {len(df)} pontos térmicos totais encontrados nas últimas 24h.")
+        
+        new_fires = []
+        state = load_state()
+        
+        for _, row in df.iterrows():
+            f_id = f"{row['latitude']}_{row['longitude']}_{row['acq_date']}"
+            
+            # Filtro de Potência
+            if row['frp'] < MIN_FRP:
+                continue
+            
+            # Filtro Industrial
+            if is_industrial(row['latitude'], row['longitude']):
+                print(f"🏭 Ignorado (Zona Industrial): {row['latitude']}, {row['longitude']}")
+                continue
+                
+            # Filtro de Duplicata
             if f_id not in state['processed_fires']:
+                print(f"🔥 NOVO FOCO DETECTADO: Lat {row['latitude']}, Lon {row['longitude']} (FRP: {row['frp']})")
                 new_fires.append(row)
                 state['processed_fires'].append(f_id)
-    
-    # Limitar histórico de estado para não crescer infinitamente
-    state['processed_fires'] = state['processed_fires'][-500:]
-    save_state(state)
-    return new_fires
+        
+        state['processed_fires'] = state['processed_fires'][-500:]
+        save_state(state)
+        return new_fires
+    except Exception as e:
+        print(f"❌ Erro ao buscar dados FIRMS: {e}")
+        return []
 
 def get_satellite_image(lat, lon):
+    print(f"📸 Solicitando imagem Sentinel-2 para {lat}, {lon}...")
     try:
         config = get_config()
-        # Criar uma BBox de 2km ao redor do ponto
         offset = 0.01 
         bbox = BBox(bbox=[lon-offset, lat-offset, lon+offset, lat+offset], crs=CRS.WGS84)
         
@@ -108,11 +129,13 @@ def get_satellite_image(lat, lon):
         
         response = request.get_data()
         if response:
-            with open("fire_spot.png", "wb") as f:
+            filename = "fire_spot.png"
+            with open(filename, "wb") as f:
                 f.write(response[0])
-            return "fire_spot.png"
+            print("✅ Imagem de satélite obtida.")
+            return filename
     except Exception as e:
-        print(f"Erro ao capturar imagem: {e}")
+        print(f"⚠️ Erro no Copernicus: {e}")
     return None
 
 def send_telegram(caption, image_path):
@@ -122,13 +145,23 @@ def send_telegram(caption, image_path):
     
     try:
         with open(image_path, 'rb') as photo:
-            requests.post(url, data={'chat_id': chat_id, 'caption': caption, 'parse_mode': 'Markdown'}, files={'photo': photo}, timeout=20)
+            r = requests.post(url, data={'chat_id': chat_id, 'caption': caption, 'parse_mode': 'Markdown'}, files={'photo': photo}, timeout=30)
+            if r.status_code == 200:
+                print("📤 Mensagem enviada ao Telegram!")
+            else:
+                print(f"❌ Erro Telegram: {r.text}")
     except Exception as e:
-        print(f"Erro ao enviar Telegram: {e}")
+        print(f"❌ Erro ao enviar: {e}")
 
 def main():
+    print("🚀 --- INICIANDO MONITORAMENTO OSINT ---")
     fires = fetch_firms_data()
-    # Pega apenas os 3 primeiros novos focos para evitar atingir limites
+    
+    if not fires:
+        print("💤 Nenhum novo incêndio relevante encontrado.")
+        return
+
+    print(f"🎯 Processando {min(len(fires), 3)} alertas...")
     for _, fire in pd.DataFrame(fires).head(3).iterrows():
         img = get_satellite_image(fire['latitude'], fire['longitude'])
         if img:
@@ -141,6 +174,10 @@ def main():
                 f"🔗 [Open Google Maps](https://www.google.com/maps?q={fire['latitude']},{fire['longitude']})"
             )
             send_telegram(caption, img)
+        else:
+            print("☁️ Imagem não disponível (nuvens ou falha no satélite).")
+    
+    print("🏁 --- MONITORAMENTO CONCLUÍDO ---")
 
 if __name__ == "__main__":
     main()
