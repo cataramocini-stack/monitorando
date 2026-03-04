@@ -109,6 +109,8 @@ def fetch_firms_data(state):
     logger.info("Starting FIRMS check")
     try:
         response = request_with_retries(url)
+        # Log completo da resposta da API FIRMS para depuração
+        logger.info(f"FIRMS API response: {response.text}")  # Exibe a resposta completa da API
         df = pd.read_csv(io.StringIO(response.text))
     except Exception as exc:
         logger.error("FIRMS fetch failed: %s", exc)
