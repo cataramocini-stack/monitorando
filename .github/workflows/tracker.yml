@@ -2,7 +2,7 @@ name: Ukraine Satellite OSINT
 
 on:
   schedule:
-    - cron: '0 */1 * * *'  # Executa a cada hora
+    - cron: '0,30 * * * *'  # Executa a cada 30 minutos
   workflow_dispatch:
 
 jobs:
@@ -42,6 +42,16 @@ jobs:
             echo '{"schema_version":1,"processed_fires":[]}' > bot_state.json
           fi
 
+      - name: Check if bot_state.json exists
+        run: |
+          if [ -f bot_state.json ]; then
+            echo "bot_state.json encontrado"
+            cat bot_state.json  # Exibe o conteúdo para verificar se está correto
+          else
+            echo "bot_state.json não encontrado"
+            exit 1
+          fi
+
       - name: Run Monitor
         env:
           NASA_API_KEY: ${{ secrets.NASA_API_KEY }}
@@ -68,6 +78,9 @@ jobs:
       - name: Commit and Push State
         if: env.ALLOW_STATE_COMMIT == 'true'
         run: |
+          echo "Verificando o status do repositório"
+          git status
+          echo "Iniciando commit e push do estado"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git fetch origin main
@@ -78,3 +91,4 @@ jobs:
             git push
           else
             echo "No state changes to commit"
+          fi
