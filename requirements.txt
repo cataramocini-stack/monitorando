@@ -3,3 +3,4 @@ sentinelhub
 shapely
 pandas
 python-dotenv
+geopy
