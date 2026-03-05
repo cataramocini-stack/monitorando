@@ -369,14 +369,16 @@ def request_sentinel_image(lat,lon,data_collection):
 
     request=SentinelHubRequest(
         evalscript=get_evalscript(),
-        input_data=[SentinelHubRequest.input_data_obj(
-            data_collection=data_collection,
-            time_interval=(
-                datetime.now(timezone.utc)-timedelta(days=3),
-                datetime.now(timezone.utc)
-            ),
-            maxcc=CLOUD_THRESHOLD
-        )],
+        input_data=[
+            SentinelHubRequest.input_data(
+                data_collection=data_collection,
+                time_interval=(
+                    datetime.now(timezone.utc)-timedelta(days=3),
+                    datetime.now(timezone.utc)
+                ),
+                maxcc=CLOUD_THRESHOLD
+            )
+        ],
         responses=[SentinelHubRequest.output_obj("default",MimeType.PNG)],
         bbox=bbox,
         size=(800,800),
@@ -407,7 +409,7 @@ def get_satellite_image(fire):
 
     path=os.path.join(img_dir,filename)
 
-    data=request_sentinel_image(lat,lon,DataCollection.SENTINEL1)
+    data=request_sentinel_image(lat,lon,DataCollection.SENTINEL2_L2A)
 
     if not data:
         return None
