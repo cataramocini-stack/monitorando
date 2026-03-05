@@ -13,7 +13,10 @@ import matplotlib.pyplot as plt
 from geopy.distance import geodesic
 from sentinelhub import SHConfig, SentinelHubRequest, DataCollection, BBox, CRS, MimeType
 
-# ----- CONFIGURAÇÃO -----
+
+# ------------------------------------------------
+# CONFIG
+# ------------------------------------------------
 
 INDUSTRIAL_SITES = [
     {"name": "Kremenchuk", "lat": 49.12, "lon": 33.48},
@@ -33,28 +36,42 @@ CLOUD_THRESHOLD = 0.2
 IMAGE_DIR = "fire_images"
 HEATMAP_DIR = "heatmaps"
 
-# cluster detection
 CLUSTER_DISTANCE_KM = 2
 CLUSTER_TIME_MINUTES = 20
 MIN_CLUSTER_POINTS = 2
 
-# agricultural fire filters
 MAX_CLUSTER_SIZE_KM = 8
 MAX_AGRI_FRP = 60
+
+AGRI_CLUSTER_POINTS = 6
+AGRI_CLUSTER_RADIUS_KM = 5
+AGRI_TIME_SPREAD_MIN = 60
+AGRI_MEAN_FRP_MAX = 40
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-# ----- CONFIGURAÇÃO SENTINEL -----
+
+# ------------------------------------------------
+# SENTINEL CONFIG
+# ------------------------------------------------
 
 def get_config():
+
     config = SHConfig()
+
     config.sh_client_id = os.getenv("CDSE_CLIENT_ID")
     config.sh_client_secret = os.getenv("CDSE_CLIENT_SECRET")
+
     config.sh_base_url = "https://sh.dataspace.copernicus.eu"
+
     return config
 
-# ----- STATE -----
+
+# ------------------------------------------------
+# STATE
+# ------------------------------------------------
 
 def load_state():
 
@@ -83,16 +100,21 @@ def load_state():
         "processed_fires":normalized
     }
 
+
 def save_state(state):
 
     with open(STATE_FILE,"w") as f:
         json.dump(state,f,indent=2)
 
+
 def processed_ids(state):
 
     return {item["id"] for item in state.get("processed_fires",[]) if "id" in item}
 
-# ----- REQUEST -----
+
+# ------------------------------------------------
+# REQUEST
+# ------------------------------------------------
 
 def request_with_retries(url,attempts=3,timeout=30):
 
@@ -117,7 +139,10 @@ def request_with_retries(url,attempts=3,timeout=30):
 
             time.sleep(backoff)
 
-# ----- UTIL -----
+
+# ------------------------------------------------
+# UTIL
+# ------------------------------------------------
 
 def is_industrial(lat,lon):
 
@@ -127,6 +152,7 @@ def is_industrial(lat,lon):
             return True
 
     return False
+
 
 def parse_fire_timestamp(acq_date,acq_time):
 
@@ -143,27 +169,36 @@ def parse_fire_timestamp(acq_date,acq_time):
 
         return datetime.now(timezone.utc)
 
+
 def build_fire_id(lat,lon,acq_date,acq_time):
 
     return f"{lat:.5f}_{lon:.5f}_{acq_date}_{str(acq_time).zfill(4)}"
 
-# ----- CLUSTER DETECTION -----
+
+# ------------------------------------------------
+# CLUSTER DETECTION
+# ------------------------------------------------
 
 def detect_clusters(fires):
 
     clusters=[]
+    visited=set()
 
-    for fire in fires:
+    for i,fire in enumerate(fires):
+
+        if i in visited:
+            continue
 
         lat=float(fire["latitude"])
         lon=float(fire["longitude"])
         t=parse_fire_timestamp(fire["acq_date"],fire["acq_time"])
 
         cluster=[fire]
+        visited.add(i)
 
-        for other in fires:
+        for j,other in enumerate(fires):
 
-            if fire==other:
+            if j in visited or i==j:
                 continue
 
             lat2=float(other["latitude"])
@@ -176,6 +211,7 @@ def detect_clusters(fires):
             if dist<=CLUSTER_DISTANCE_KM and dt<=CLUSTER_TIME_MINUTES:
 
                 cluster.append(other)
+                visited.add(j)
 
         if len(cluster)>=MIN_CLUSTER_POINTS:
 
@@ -183,13 +219,21 @@ def detect_clusters(fires):
 
     return clusters
 
-# ----- AGRICULTURAL FIRE FILTER -----
+
+# ------------------------------------------------
+# AGRICULTURAL FILTER
+# ------------------------------------------------
 
 def is_agricultural_pattern(cluster):
 
     lats=[float(f["latitude"]) for f in cluster]
     lons=[float(f["longitude"]) for f in cluster]
     frps=[float(f["frp"]) for f in cluster]
+
+    times=[
+        parse_fire_timestamp(f["acq_date"],f["acq_time"])
+        for f in cluster
+    ]
 
     center=(sum(lats)/len(lats),sum(lons)/len(lons))
 
@@ -198,15 +242,27 @@ def is_agricultural_pattern(cluster):
         for i in range(len(cluster))
     )
 
-    if max_dist>MAX_CLUSTER_SIZE_KM:
+    mean_frp=sum(frps)/len(frps)
+
+    time_spread=max(times)-min(times)
+    time_spread_minutes=time_spread.total_seconds()/60
+
+    if len(cluster)>=AGRI_CLUSTER_POINTS:
+        if max_dist>AGRI_CLUSTER_RADIUS_KM:
+            return True
+
+    if mean_frp<AGRI_MEAN_FRP_MAX and time_spread_minutes>AGRI_TIME_SPREAD_MIN:
         return True
 
-    if max(frps)<MAX_AGRI_FRP:
+    if max_dist>MAX_CLUSTER_SIZE_KM and max(frps)<MAX_AGRI_FRP:
         return True
 
     return False
 
-# ----- HEATMAP -----
+
+# ------------------------------------------------
+# HEATMAP
+# ------------------------------------------------
 
 def generate_heatmap(fires):
 
@@ -236,7 +292,10 @@ def generate_heatmap(fires):
 
     logger.info("Heatmap generated: %s",path)
 
-# ----- FIRMS -----
+
+# ------------------------------------------------
+# FIRMS
+# ------------------------------------------------
 
 def fetch_dataset(api_key,dataset):
 
@@ -255,6 +314,7 @@ def fetch_dataset(api_key,dataset):
         logger.error("Dataset error %s : %s",dataset,e)
 
         return pd.DataFrame()
+
 
 def fetch_firms_data(state):
 
@@ -311,17 +371,15 @@ def fetch_firms_data(state):
 
     clusters=detect_clusters(new_fires)
 
-    filtered_fires=[]
+    filtered=[]
 
     for cluster in clusters:
 
         if not is_agricultural_pattern(cluster):
+            filtered.extend(cluster)
 
-            filtered_fires.extend(cluster)
-
-    if filtered_fires:
-
-        new_fires=filtered_fires+new_fires
+    if filtered:
+        new_fires=filtered
 
     generate_heatmap(new_fires)
 
@@ -329,7 +387,10 @@ def fetch_firms_data(state):
 
     return new_fires
 
-# ----- SENTINEL HUB -----
+
+# ------------------------------------------------
+# SENTINEL IMAGE
+# ------------------------------------------------
 
 def get_evalscript():
     return """
@@ -356,6 +417,7 @@ function evaluatePixel(sample){
 }
 """
 
+
 def request_sentinel_image(lat,lon,data_collection):
 
     config=get_config()
@@ -368,7 +430,9 @@ def request_sentinel_image(lat,lon,data_collection):
     )
 
     request=SentinelHubRequest(
+
         evalscript=get_evalscript(),
+
         input_data=[
             SentinelHubRequest.input_data(
                 data_collection=data_collection,
@@ -379,9 +443,13 @@ def request_sentinel_image(lat,lon,data_collection):
                 maxcc=CLOUD_THRESHOLD
             )
         ],
-        responses=[SentinelHubRequest.output_obj("default",MimeType.PNG)],
+
+        responses=[SentinelHubRequest.output_response("default",MimeType.PNG)],
+
         bbox=bbox,
+
         size=(800,800),
+
         config=config
     )
 
@@ -391,6 +459,7 @@ def request_sentinel_image(lat,lon,data_collection):
         return data[0]
 
     return None
+
 
 def get_satellite_image(fire):
 
@@ -421,13 +490,18 @@ def get_satellite_image(fire):
 
     return path
 
-# ----- TELEGRAM -----
+
+# ------------------------------------------------
+# TELEGRAM
+# ------------------------------------------------
 
 def escape_markdown_v2(text):
     return re.sub(r"([_*\[\]()~`>#+\-=|{}.!])",r"\\\1",str(text))
 
+
 def escape_markdown_v2_url(url):
     return url.replace("\\","\\\\").replace(")","\\)").replace("(","\\(")
+
 
 def build_caption(fire):
 
@@ -448,6 +522,7 @@ def build_caption(fire):
         "🛰️ *Sensor:* VIIRS (NASA)\n\n"
         f"🔗 [View on Google Maps]({url})"
     )
+
 
 def send_telegram(caption,image_path):
 
@@ -490,11 +565,14 @@ def send_telegram(caption,image_path):
 
         return False
 
-# ----- PROCESSAMENTO -----
+
+# ------------------------------------------------
+# PROCESS
+# ------------------------------------------------
 
 def is_fire_confirmed(fire):
-
     return fire.get("frp",0)>=MIN_FRP
+
 
 def build_state_entry(fire):
 
@@ -507,12 +585,13 @@ def build_state_entry(fire):
         "processed_at":datetime.now(timezone.utc).isoformat()
     }
 
+
 def process_fire(fire):
 
     if not is_fire_confirmed(fire):
 
         logger.info(
-            f"Incêndio descartado (potência de fogo abaixo do limite): {fire['fire_id']}"
+            f"Incêndio descartado (potência abaixo do limite): {fire['fire_id']}"
         )
 
         return None
@@ -530,7 +609,10 @@ def process_fire(fire):
 
     return None
 
-# ----- MAIN -----
+
+# ------------------------------------------------
+# MAIN
+# ------------------------------------------------
 
 def main():
 
@@ -543,7 +625,6 @@ def main():
         if not fires:
 
             logger.info("No new fires to process")
-
             return
 
         fires_to_process=fires[:MAX_ALERTS]
@@ -595,6 +676,7 @@ def main():
     except Exception as exc:
 
         logger.exception("Unhandled error in main: %s",exc)
+
 
 if __name__ == "__main__":
     main()
