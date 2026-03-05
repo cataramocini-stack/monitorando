@@ -49,6 +49,10 @@ AGRI_TIME_SPREAD_MIN = 60
 AGRI_MEAN_FRP_MAX = 40
 
 
+# Ucrânia apenas
+FIRMS_BBOX = "22,44,40,52"
+
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -58,14 +62,10 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------
 
 def get_config():
-
     config = SHConfig()
-
     config.sh_client_id = os.getenv("CDSE_CLIENT_ID")
     config.sh_client_secret = os.getenv("CDSE_CLIENT_SECRET")
-
     config.sh_base_url = "https://sh.dataspace.copernicus.eu"
-
     return config
 
 
@@ -76,10 +76,8 @@ def get_config():
 def load_state():
 
     if os.path.exists(STATE_FILE):
-
         with open(STATE_FILE,"r") as f:
             data=json.load(f)
-
     else:
         data={}
 
@@ -299,7 +297,7 @@ def generate_heatmap(fires):
 
 def fetch_dataset(api_key,dataset):
 
-    url=f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{api_key}/{dataset}/22,44,41,53/1"
+    url=f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{api_key}/{dataset}/{FIRMS_BBOX}/1"
 
     try:
 
@@ -372,14 +370,21 @@ def fetch_firms_data(state):
     clusters=detect_clusters(new_fires)
 
     filtered=[]
+    clustered_ids=set()
 
     for cluster in clusters:
 
         if not is_agricultural_pattern(cluster):
             filtered.extend(cluster)
 
-    if filtered:
-        new_fires=filtered
+        for f in cluster:
+            clustered_ids.add(f["fire_id"])
+
+    for fire in new_fires:
+        if fire["fire_id"] not in clustered_ids:
+            filtered.append(fire)
+
+    new_fires=filtered
 
     generate_heatmap(new_fires)
 
@@ -429,34 +434,41 @@ def request_sentinel_image(lat,lon,data_collection):
         crs=CRS.WGS84
     )
 
-    request=SentinelHubRequest(
+    now=datetime.now(timezone.utc)
 
-        evalscript=get_evalscript(),
+    intervals=[
+        (now-timedelta(days=3),now),
+        (now-timedelta(days=7),now),
+        (now-timedelta(days=14),now)
+    ]
 
-        input_data=[
-            SentinelHubRequest.input_data(
-                data_collection=data_collection,
-                time_interval=(
-                    datetime.now(timezone.utc)-timedelta(days=3),
-                    datetime.now(timezone.utc)
-                ),
-                maxcc=CLOUD_THRESHOLD
-            )
-        ],
+    for interval in intervals:
 
-        responses=[SentinelHubRequest.output_response("default",MimeType.PNG)],
+        request=SentinelHubRequest(
 
-        bbox=bbox,
+            evalscript=get_evalscript(),
 
-        size=(800,800),
+            input_data=[
+                SentinelHubRequest.input_data(
+                    data_collection=data_collection,
+                    time_interval=interval,
+                    maxcc=CLOUD_THRESHOLD
+                )
+            ],
 
-        config=config
-    )
+            responses=[SentinelHubRequest.output_response("default",MimeType.PNG)],
 
-    data=request.get_data()
+            bbox=bbox,
 
-    if data:
-        return data[0]
+            size=(800,800),
+
+            config=config
+        )
+
+        data=request.get_data()
+
+        if data:
+            return data[0]
 
     return None
 
@@ -466,17 +478,13 @@ def get_satellite_image(fire):
     lat=float(fire["latitude"])
     lon=float(fire["longitude"])
 
-    date_dir=datetime.now(timezone.utc).strftime("%Y%m%d")
-
-    img_dir=os.path.join(IMAGE_DIR,date_dir)
-
-    os.makedirs(img_dir,exist_ok=True)
+    os.makedirs(IMAGE_DIR,exist_ok=True)
 
     ts=datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
 
     filename=f"fire_{fire['fire_id']}_{ts}.png"
 
-    path=os.path.join(img_dir,filename)
+    path=os.path.join(IMAGE_DIR,filename)
 
     data=request_sentinel_image(lat,lon,DataCollection.SENTINEL2_L2A)
 
@@ -530,7 +538,6 @@ def send_telegram(caption,image_path):
     chat_id=os.getenv("TELEGRAM_CHAT_ID")
 
     if not token or not chat_id:
-
         logger.error("Telegram credentials not configured")
         return False
 
@@ -550,19 +557,15 @@ def send_telegram(caption,image_path):
             )
 
         if response.status_code>=400:
-
             logger.error("Telegram send failed: %s",response.text)
-
             return False
 
         logger.info("Telegram sent for image %s",image_path)
-
         return True
 
     except Exception as exc:
 
         logger.error("Telegram send failed: %s",exc)
-
         return False
 
 
@@ -589,11 +592,6 @@ def build_state_entry(fire):
 def process_fire(fire):
 
     if not is_fire_confirmed(fire):
-
-        logger.info(
-            f"Incêndio descartado (potência abaixo do limite): {fire['fire_id']}"
-        )
-
         return None
 
     image_path=get_satellite_image(fire)
@@ -604,7 +602,6 @@ def process_fire(fire):
     caption=build_caption(fire)
 
     if send_telegram(caption,image_path):
-
         return build_state_entry(fire)
 
     return None
@@ -623,7 +620,6 @@ def main():
         fires=fetch_firms_data(state)
 
         if not fires:
-
             logger.info("No new fires to process")
             return
 
@@ -631,30 +627,16 @@ def main():
 
         processed_entries=[]
 
-        if len(fires_to_process)>1:
+        with ThreadPoolExecutor(max_workers=min(4,len(fires_to_process))) as executor:
 
-            with ThreadPoolExecutor(
-                max_workers=min(4,len(fires_to_process))
-            ) as executor:
+            futures=[executor.submit(process_fire,fire) for fire in fires_to_process]
 
-                futures=[
-                    executor.submit(process_fire,fire)
-                    for fire in fires_to_process
-                ]
+            for future in as_completed(futures):
 
-                for future in as_completed(futures):
+                entry=future.result()
 
-                    entry=future.result()
-
-                    if entry:
-                        processed_entries.append(entry)
-
-        else:
-
-            entry=process_fire(fires_to_process[0])
-
-            if entry:
-                processed_entries.append(entry)
+                if entry:
+                    processed_entries.append(entry)
 
         if processed_entries:
 
@@ -664,10 +646,7 @@ def main():
 
             save_state(state)
 
-            logger.info(
-                "State updated with %s new entries",
-                len(processed_entries)
-            )
+            logger.info("State updated with %s new entries",len(processed_entries))
 
         else:
 
