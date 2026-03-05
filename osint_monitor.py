@@ -240,7 +240,7 @@ def generate_heatmap(fires):
 
 def fetch_dataset(api_key,dataset):
 
-    url=f"https://firms.modaps.eosdis.nasa.gov/api/country/csv/{api_key}/{dataset}/UKR/1"
+    url=f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{api_key}/{dataset}/22,44,41,53/1"
 
     try:
 
