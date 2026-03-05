@@ -5,3 +5,4 @@ pandas
 python-dotenv
 geopy
 matplotlib
+numpy
