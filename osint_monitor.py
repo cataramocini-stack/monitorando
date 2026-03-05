@@ -21,7 +21,7 @@ INDUSTRIAL_SITES = [
     {"name": "Odessa Port", "lat": 46.50, "lon": 30.73}
 ]
 
-MIN_FRP = 35.0
+MIN_FRP = 15.0
 
 STATE_FILE = "bot_state.json"
 
