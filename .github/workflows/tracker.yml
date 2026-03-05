@@ -2,39 +2,30 @@ name: Ukraine Satellite OSINT
 
 on:
   schedule:
-    - cron: '0,30 * * * *'  # Executa a cada 30 minutos
+    - cron: "0,30 * * * *"
   workflow_dispatch:
 
 jobs:
-  build:
+  run-bot:
     runs-on: ubuntu-latest
+
     permissions:
-      contents: write  # Necessário para commit do estado
-    env:
-      ALLOW_STATE_COMMIT: true  # Habilita commit automático do estado
+      contents: write
 
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
-          cache-dependency-path: requirements.txt
-
-      - name: Restore state cache
-        uses: actions/cache@v4
-        with:
-          path: bot_state.json
-          key: bot-state-${{ runner.os }}-${{ hashFiles('bot_state.json') }}
-          restore-keys: |
-            bot-state-
+          python-version: "3.11"
+          cache: pip
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Ensure state file exists
         run: |
@@ -42,17 +33,7 @@ jobs:
             echo '{"schema_version":1,"processed_fires":[]}' > bot_state.json
           fi
 
-      - name: Check if bot_state.json exists
-        run: |
-          if [ -f bot_state.json ]; then
-            echo "bot_state.json encontrado"
-            cat bot_state.json  # Exibe o conteúdo para verificar se está correto
-          else
-            echo "bot_state.json não encontrado"
-            exit 1
-          fi
-
-      - name: Run Monitor
+      - name: Run OSINT Monitor
         env:
           NASA_API_KEY: ${{ secrets.NASA_API_KEY }}
           CDSE_CLIENT_ID: ${{ secrets.CDSE_CLIENT_ID }}
@@ -61,34 +42,29 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python osint_monitor.py
 
-      - name: Upload fire images
+      - name: Upload Fire Images
         uses: actions/upload-artifact@v4
         with:
           name: fire-images
           path: fire_images/*.png
           if-no-files-found: ignore
 
-      - name: Upload state
+      - name: Upload Heatmaps
         uses: actions/upload-artifact@v4
         with:
-          name: bot-state
-          path: bot_state.json
+          name: heatmaps
+          path: heatmaps/*.png
           if-no-files-found: ignore
 
-      - name: Commit and Push State
-        if: env.ALLOW_STATE_COMMIT == 'true'
+      - name: Commit state
         run: |
-          echo "Verificando o status do repositório"
-          git status
-          echo "Iniciando commit e push do estado"
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git fetch origin main
-          git checkout main
-          if git status --porcelain bot_state.json | grep .; then
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          if git diff --quiet bot_state.json; then
+            echo "No state changes"
+          else
             git add bot_state.json
             git commit -m "Update fire state [skip ci]"
             git push
-          else
-            echo "No state changes to commit"
           fi
