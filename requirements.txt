@@ -4,3 +4,4 @@ shapely
 pandas
 python-dotenv
 geopy
+matplotlib
